@@ -3,29 +3,18 @@ import json
 from models import CRMPipelineAction, CRMPipelineObservation, CRMPipelineState
 
 try:
-    from openenv.core.http_env_client import HTTPEnvClient
-    from openenv.core.types import StepResult
+    from openenv.core import EnvClient
+    from openenv.core.client_types import StepResult
 except ImportError:
-    # Stubs
-    class HTTPEnvClient:
-       def __init__(self, **kwargs): pass
-       def sync(self): return self
-       def __enter__(self): return self
-       def __exit__(self, exc_type, exc_val, exc_tb): pass
-    class StepResult:
-       def __init__(self, observation, reward, done):
-            self.observation = observation
-            self.reward = reward
-            self.done = done
+    class EnvClient: pass
+    class StepResult: pass
 
-class CRMDataPipelineEnvClient(HTTPEnvClient):
+class CRMDataPipelineEnvClient(EnvClient[CRMPipelineAction, CRMPipelineObservation, CRMPipelineState]):
     def _step_payload(self, action: CRMPipelineAction) -> dict:
         return json.loads(action.model_dump_json(exclude_none=True))
 
     def _parse_result(self, payload: dict) -> "StepResult":
-        # Check standard OpenEnv payload vs direct observation dictionary
         obs_data = payload.get("observation", payload)
-        
         obs = CRMPipelineObservation(
             done=obs_data.get("done", False) or payload.get("done", False),
             reward=obs_data.get("reward") or payload.get("reward", 0.0),

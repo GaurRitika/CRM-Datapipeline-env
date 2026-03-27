@@ -6,13 +6,19 @@ from client import CRMDataPipelineEnvClient
 from models import CRMPipelineAction, PipelineActionType
 
 def run_task(task_id: str):
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", "sk-mock-key-for-validation-pass"))
+    # ==========================================
+    # 🔑 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
+    # ==========================================
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", "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"))
     
     # Run locally or default container port 8080
     base_url = os.environ.get("OPENENV_BASE_URL", "http://localhost:8080")
     
     print(f"--- Starting Baseline Inference for Task {task_id} ---")
     score = 0.0
+    
+    # Tell the server which task to spin up for this run
+    requests.post(f"{base_url}/set_task/{task_id}")
     
     # We wrap in try block so automated validation doesn't crash entirely if server goes down
     try:

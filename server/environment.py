@@ -25,10 +25,15 @@ except ImportError:
             self.reward = reward
             self.done = done
 
+import os
+
+LAST_ENV_INSTANCE = {}
+
 class CRMDataPipelineEnv(Environment):
-    def __init__(self):
-        self._state = CRMPipelineState()
-        self._task_id = "t1" # Default to Easy
+    def __init__(self, **kwargs):
+        self._task_id = os.environ.get("CURRENT_TASK_ID", "t1")
+        LAST_ENV_INSTANCE[self._task_id] = self
+        self._state = CRMPipelineState(episode_id=None, step_count=0, task_id=self._task_id)
         self._sources: Dict[str, pd.DataFrame] = {}
         self._ground_truth: Dict[str, pd.DataFrame] = {}
         self._schema_target: Dict[str, str] = {}
@@ -39,12 +44,12 @@ class CRMDataPipelineEnv(Environment):
 
     def reset(self, task_id: str = "t1") -> StepResult:
         self._task_id = task_id
-        srcs, truths, schema = get_task_data(task_id)
+        task_data = get_task_data(task_id)
         
         # We must clone these dataframes so mutations don't bleed across episodes
-        self._sources = {k: v.copy() for k, v in srcs.items()}
-        self._ground_truth = {k: v.copy() for k, v in truths.items()}
-        self._schema_target = schema
+        self._sources = {k: v.copy() for k, v in task_data["sources"].items()}
+        self._ground_truth = {k: v.copy() for k, v in task_data["hidden_truth"].items()}
+        self._schema_target = task_data["schema"]
         
         self._state = CRMPipelineState(
             episode_id=str(uuid.uuid4()),
