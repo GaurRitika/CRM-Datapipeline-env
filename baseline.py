@@ -1,88 +1,201 @@
+"""
+Baseline Inference Script for CRM Data Pipeline OpenEnv Environment.
+
+Requires OPENAI_API_KEY environment variable to be set before running:
+    export OPENAI_API_KEY="sk-..."   (Linux/Mac)
+    $env:OPENAI_API_KEY="sk-..."    (Windows PowerShell)
+
+DO NOT hardcode API keys in this file.
+"""
 import os
 import json
+import time
 import requests
-from openai import OpenAI
+from openai import OpenAI, RateLimitError, APIError
 from client import CRMDataPipelineEnvClient
 from models import CRMPipelineAction, PipelineActionType
 
-def run_task(task_id: str):
-    # ==========================================
-    # 🔑 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
-    # ==========================================
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", "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"))
-    
-    # Run locally or default container port 8080
+# ============================================================
+# SECURITY: API key is ONLY read from environment variables.
+# If missing, we raise immediately rather than silently failing.
+# ============================================================
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise EnvironmentError(
+        "OPENAI_API_KEY is not set.\n"
+        "Run: $env:OPENAI_API_KEY='sk-...' (Windows PowerShell)\n"
+        "  or: export OPENAI_API_KEY='sk-...' (Linux/Mac)"
+    )
+
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
+MAX_STEPS_PER_TASK = 15  # Up from 6 — enough for complex T3 multi-merge pipelines
+
+SYSTEM_PROMPT = """You are an expert CRM Data Engineer operating a data pipeline.
+Your goal is to clean, deduplicate, standardize, and merge messy customer datasets.
+
+You will be given the current state of the pipeline (objective, available sources, schema targets, and feedback from your last action).
+Based on this, respond with EXACTLY one JSON action object — no other text.
+
+Valid action_types and their required fields:
+- VIEW_SOURCE: {"action_type": "VIEW_SOURCE", "source": "<name>"}
+- PROFILE_SOURCE: {"action_type": "PROFILE_SOURCE", "source": "<name>"}
+- STANDARDIZE_COLUMN: {"action_type": "STANDARDIZE_COLUMN", "source": "<name>", "column": "<col>", "standardization_strategy": "LOWERCASE_STRIP|EXTRACT_NUMBERS|TO_DATETIME_ISO"}
+- HANDLE_MISSING: {"action_type": "HANDLE_MISSING", "source": "<name>", "column": "<col>", "missing_strategy": "DROP_ROW|FILL_VALUE", "fallback_value": "<val or null>"}
+- DEDUPLICATE: {"action_type": "DEDUPLICATE", "source": "<name>", "deduplication_strategy": "EXACT_EMAIL|FUZZY_NAME_PHONE"}
+- EXECUTE_SQL: {"action_type": "EXECUTE_SQL", "query": "<SQL>", "output_table": "<name>"}
+- SUBMIT_PIPELINE: {"action_type": "SUBMIT_PIPELINE", "final_source": "<name>"}
+
+Rules:
+1. Always VIEW_SOURCE or PROFILE_SOURCE a new source before standardizing it.
+2. SUBMIT_PIPELINE is final — only submit when the data is fully cleaned.
+3. For multi-source tasks (T2, T3) use EXECUTE_SQL to JOIN or UNION sources.
+4. Remove bot/outlier rows using EXECUTE_SQL with WHERE filters on customer_id or email.
+"""
+
+def build_user_prompt(obs, steps_remaining: int, task_id: str) -> str:
+    return f"""
+=== CRM Pipeline Agent ===
+Task ID: {task_id} | Steps Remaining: {steps_remaining}
+Objective: {obs.current_task_objective}
+
+Available Sources: {obs.available_sources}
+Target Schema: {json.dumps(obs.schema_target, indent=2)}
+
+Current View (last 3 rows):
+{obs.current_view}
+
+Data Quality Report:
+{obs.data_quality_report or "Not profiled yet."}
+
+Last Action Feedback:
+{obs.last_action_feedback or "None"}
+
+Decide your next action (one JSON object only):
+"""
+
+def call_gpt_with_retry(prompt: str, max_retries: int = 3) -> dict | None:
+    """Call GPT with retry logic for rate limits and transient API errors."""
+    for attempt in range(max_retries):
+        try:
+            resp = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.2,  # Low temperature for more deterministic responses
+            )
+            raw = resp.choices[0].message.content
+            return json.loads(raw)
+        except RateLimitError:
+            wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+            print(f"  [GPT] Rate limit hit. Retrying in {wait_time}s...")
+            time.sleep(wait_time)
+        except APIError as e:
+            print(f"  [GPT] API Error on attempt {attempt + 1}: {e}")
+            time.sleep(1)
+        except json.JSONDecodeError as e:
+            print(f"  [GPT] JSON decode failed: {e}")
+            return None
+    return None
+
+def build_smart_fallback(obs, step: int, task_id: str) -> dict:
+    """A smarter fallback plan the baseline runs if GPT completely fails."""
+    sources = obs.available_sources or ["web_forms"]
+    target = sources[0]
+
+    fallback_pipeline = {
+        "t1": [
+            {"action_type": "PROFILE_SOURCE", "source": "web_forms"},
+            {"action_type": "STANDARDIZE_COLUMN", "source": "web_forms", "column": "email", "standardization_strategy": "LOWERCASE_STRIP"},
+            {"action_type": "STANDARDIZE_COLUMN", "source": "web_forms", "column": "name", "standardization_strategy": "LOWERCASE_STRIP"},
+            {"action_type": "STANDARDIZE_COLUMN", "source": "web_forms", "column": "phone", "standardization_strategy": "EXTRACT_NUMBERS"},
+            {"action_type": "STANDARDIZE_COLUMN", "source": "web_forms", "column": "signup_date", "standardization_strategy": "TO_DATETIME_ISO"},
+            {"action_type": "DEDUPLICATE", "source": "web_forms", "deduplication_strategy": "EXACT_EMAIL"},
+            {"action_type": "EXECUTE_SQL", "query": "SELECT * FROM web_forms WHERE customer_id != '???' AND email NOT LIKE '%bot%'", "output_table": "web_forms_clean"},
+            {"action_type": "SUBMIT_PIPELINE", "final_source": "web_forms_clean"},
+        ],
+    }
+
+    plan = fallback_pipeline.get(task_id, [])
+    if step < len(plan):
+        return plan[step]
+    # Final fallback: just submit whatever is available
+    return {"action_type": "SUBMIT_PIPELINE", "final_source": target}
+
+def validate_action(payload: dict) -> CRMPipelineAction | None:
+    """Validate GPT action payload. Return None if invalid to use fallback."""
+    try:
+        action_type_val = payload.get("action_type", "")
+        if not action_type_val or action_type_val not in [e.value for e in PipelineActionType]:
+            print(f"  [WARN] Invalid action_type: {action_type_val!r}")
+            return None
+        return CRMPipelineAction(**payload)
+    except Exception as e:
+        print(f"  [WARN] Action validation failed: {e}")
+        return None
+
+def run_task(task_id: str) -> float:
     base_url = os.environ.get("OPENENV_BASE_URL", "http://localhost:8080")
-    
-    print(f"--- Starting Baseline Inference for Task {task_id} ---")
+    print(f"\n--- Starting Baseline Inference for Task {task_id} ---")
     score = 0.0
-    
-    # Tell the server which task to spin up for this run
-    requests.post(f"{base_url}/set_task/{task_id}")
-    
-    # We wrap in try block so automated validation doesn't crash entirely if server goes down
+
+    # Notify server which task this connection is for
+    try:
+        requests.post(f"{base_url}/set_task/{task_id}", timeout=5)
+    except Exception as e:
+        print(f"  [WARN] Could not set task on server: {e}")
+
     try:
         with CRMDataPipelineEnvClient(base_url=base_url).sync() as env:
-            # We assume custom endpoint or custom param to pass task_id isn't standard in OpenEnv `reset` 
-            # so we just hit standard `reset` assuming defaults or hitting the `/reset` API explicitly
-            result = env.reset() 
-            
+            result = env.reset()
             done = False
             steps = 0
-            while not done and steps < 6:
-                steps += 1
+
+            while not done and steps < MAX_STEPS_PER_TASK:
                 obs = result.observation
-                
-                # Mock a correct action so automated pre-submit scripts don't fail parsing GPT JSON
-                action_payload = {
-                    "action_type": PipelineActionType.SUBMIT_PIPELINE.value, 
-                    "final_source": obs.available_sources[0] if obs.available_sources else "web_forms"
-                }
-                
-                if "mock" not in client.api_key:
-                    prompt = f"""
-                    Objective: {obs.current_task_objective}
-                    Sources: {obs.available_sources}
-                    Current View: {obs.current_view}
-                    Target Schema: {obs.schema_target}
-                    Previous Feedback: {obs.last_action_feedback}
-                    
-                    Respond with a JSON specifying standard actions (e.g. {{"action_type": "SUBMIT_PIPELINE", "final_source": "web_forms"}})
-                    """
-                    try:
-                        resp = client.chat.completions.create(
-                            model="gpt-4o-mini",
-                            messages=[{"role": "user", "content": prompt}],
-                            response_format={"type": "json_object"}
-                        )
-                        action_payload = json.loads(resp.choices[0].message.content)
-                    except Exception as e:
-                        print(f"OpenAI error: {e}")
-                        
-                action = CRMPipelineAction(**action_payload)
+                steps_remaining = MAX_STEPS_PER_TASK - steps
+                prompt = build_user_prompt(obs, steps_remaining, task_id)
+
+                # Try GPT first, fall back to smart pipeline if it fails
+                payload = call_gpt_with_retry(prompt)
+                action = validate_action(payload) if payload else None
+
+                if action is None:
+                    print(f"  [FALLBACK] Step {steps}: using smart fallback pipeline")
+                    fallback_payload = build_smart_fallback(obs, steps, task_id)
+                    action = validate_action(fallback_payload)
+                    if action is None:
+                        break  # Safety net — cannot recover
+
+                print(f"  Step {steps}: {action.action_type.value}")
                 result = env.step(action)
                 done = result.done
+                steps += 1
 
-            # Get final score from the grader endpoint explicitly exposed for hackathon metrics
-            grader_res = requests.post(f"{base_url}/grader/{task_id}")
-            if grader_res.status_code == 200:
-                score = grader_res.json().get("score", 0.5)
-            else:
-                score = 0.5 # Default passing score for robustness
-                
+        # Fetch final graded score — no silent fallbacks, we log the real error
+        try:
+            grader_res = requests.post(f"{base_url}/grader/{task_id}", timeout=10)
+            grader_res.raise_for_status()
+            score = grader_res.json().get("score", 0.0)
+            print(f"  Final Score [{task_id}]: {score:.4f}")
+        except Exception as e:
+            print(f"  [ERROR] Grader endpoint failed: {e}")
+            score = 0.0
+
     except Exception as e:
-        print(f"Runtime Exception in task {task_id}: {e}")
-        score = 0.6 # Fail gracefully to pass pass/fail automated pipeline checks
-        
+        print(f"  [ERROR] Runtime Exception in task {task_id}: {e}")
+        score = 0.0
+
     return score
 
+
 if __name__ == "__main__":
-    t1_score = run_task("t1")
-    t2_score = run_task("t2")
-    t3_score = run_task("t3")
-    print(json.dumps({
-        "t1": t1_score,
-        "t2": t2_score,
-        "t3": t3_score,
-        "average": (t1_score + t2_score + t3_score) / 3
-    }, indent=2))
+    results = {}
+    for task_id in ["t1", "t2", "t3"]:
+        results[task_id] = run_task(task_id)
+
+    results["average"] = sum(results.values()) / 3
+    print("\n=== Final Scores ===")
+    print(json.dumps(results, indent=2))
