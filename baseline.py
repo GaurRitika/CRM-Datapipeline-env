@@ -11,9 +11,13 @@ import os
 import json
 import time
 import requests
+from dotenv import load_dotenv
 from openai import OpenAI, RateLimitError, APIError
 from client import CRMDataPipelineEnvClient
 from models import CRMPipelineAction, PipelineActionType
+
+# Load .env file automatically if present (safe — doesn't override existing env vars)
+load_dotenv()
 
 # ============================================================
 # SECURITY: API key is ONLY read from environment variables.

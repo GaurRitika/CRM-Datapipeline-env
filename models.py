@@ -1,7 +1,6 @@
 from enum import Enum
 from typing import List, Dict, Optional, Any
 from pydantic import Field
-from dataclasses import dataclass
 
 try:
     from openenv.core.env_server import Action, Observation, State
@@ -45,7 +44,6 @@ class PipelineActionType(str, Enum):
     EXECUTE_SQL = "EXECUTE_SQL"
     SUBMIT_PIPELINE = "SUBMIT_PIPELINE"
 
-@dataclass
 class CRMPipelineAction(Action):
     action_type: PipelineActionType = Field(..., description="The type of action to perform")
     source: Optional[str] = Field(None, description="The primary dataset source to act upon")
@@ -61,7 +59,6 @@ class CRMPipelineAction(Action):
     query: Optional[str] = Field(None, description="Raw SQL query for EXECUTE_SQL action")
     output_table: Optional[str] = Field(None, description="Table name to write SQL output into")
 
-@dataclass
 class CRMPipelineObservation(Observation):
     done: bool
     reward: Optional[float]
@@ -72,7 +69,6 @@ class CRMPipelineObservation(Observation):
     data_quality_report: Optional[str] # Markdown string of quality report
     last_action_feedback: str
 
-@dataclass
 class CRMPipelineState(State):
     episode_id: Optional[str] = None
     step_count: int = 0
