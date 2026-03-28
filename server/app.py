@@ -17,6 +17,10 @@ from models import CRMPipelineAction, CRMPipelineObservation
 app = create_fastapi_app(CRMDataPipelineEnv, CRMPipelineAction, CRMPipelineObservation)
 router = APIRouter()
 
+@router.get("/")
+def read_root():
+    return {"status": "ok", "message": "CRM Pipeline Environment is running."}
+
 # ---------------------------------------------------------------------------
 # /tasks  — static task catalogue
 # ---------------------------------------------------------------------------
