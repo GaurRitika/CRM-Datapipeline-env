@@ -1,9 +1,7 @@
 """
 Baseline Inference Script for CRM Data Pipeline OpenEnv Environment.
 
-Requires OPENAI_API_KEY environment variable to be set before running:
-    export OPENAI_API_KEY="sk-..."   (Linux/Mac)
-    $env:OPENAI_API_KEY="sk-..."    (Windows PowerShell)
+Requires HF_TOKEN, API_BASE_URL, and MODEL_NAME environment variables to be set before running.
 
 DO NOT hardcode API keys in this file.
 """
@@ -23,15 +21,17 @@ load_dotenv()
 # SECURITY: API key is ONLY read from environment variables.
 # If missing, we raise immediately rather than silently failing.
 # ============================================================
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise EnvironmentError(
-        "OPENAI_API_KEY is not set.\n"
-        "Run: $env:OPENAI_API_KEY='sk-...' (Windows PowerShell)\n"
-        "  or: export OPENAI_API_KEY='sk-...' (Linux/Mac)"
-    )
+HF_TOKEN = os.environ.get("HF_TOKEN")
+API_BASE_URL = os.environ.get("API_BASE_URL")
+MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-4o-mini")
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+if not HF_TOKEN:
+    raise EnvironmentError("HF_TOKEN is not set.")
+
+openai_client = OpenAI(
+    api_key=HF_TOKEN,
+    base_url=API_BASE_URL
+)
 MAX_STEPS_PER_TASK = 15  # Up from 6 — enough for complex T3 multi-merge pipelines
 
 SYSTEM_PROMPT = """You are an expert CRM Data Engineer operating a data pipeline.
@@ -82,7 +82,7 @@ def call_gpt_with_retry(prompt: str, max_retries: int = 3) -> dict | None:
     for attempt in range(max_retries):
         try:
             resp = openai_client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=MODEL_NAME,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": prompt}

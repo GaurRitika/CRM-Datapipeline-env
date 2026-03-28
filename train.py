@@ -13,11 +13,11 @@ class QTableAgent:
         self.gamma = gamma
         self.epsilon = epsilon
 
-    def get_state_repr(self, obs):
+    def get_state_repr(self, obs, current_step):
         # Discretize state for tabular RL
         sources = ",".join(sorted(obs.available_sources))
         has_report = "Y" if obs.data_quality_report else "N"
-        return f"{sources}|{has_report}"
+        return f"{sources}|{has_report}|step={current_step}"
 
     def choose_action(self, state_repr):
         if random.random() < self.epsilon:
@@ -56,7 +56,7 @@ def train(task_id="t1", episodes=10):
                 total_reward = 0
                 steps = 0
                 
-                state_repr = agent.get_state_repr(result.observation)
+                state_repr = agent.get_state_repr(result.observation, steps)
                 
                 while not done and steps < 10:
                     if not result.observation.available_sources:
@@ -82,7 +82,7 @@ def train(task_id="t1", episodes=10):
                     action = CRMPipelineAction(**action_payload)
                     result = env.step(action)
                     
-                    next_state_repr = agent.get_state_repr(result.observation)
+                    next_state_repr = agent.get_state_repr(result.observation, steps + 1)
                     reward = result.reward
                     
                     agent.learn(state_repr, action_type, reward, next_state_repr)
@@ -93,9 +93,12 @@ def train(task_id="t1", episodes=10):
                     steps += 1
                 
                 history.append(total_reward)
-                if (ep + 1) % 5 == 0:
-                    avg_reward = sum(history[-5:]) / 5
-                    print(f"  Episode {ep+1}/{episodes} | Avg Reward: {avg_reward:.4f}")
+                if (ep + 1) % 10 == 0:
+                    avg_reward = sum(history[-10:]) / 10
+                    print(f"  Episode {ep+1}/{episodes} | Avg Reward: {avg_reward:.4f} | Epsilon: {agent.epsilon:.3f}")
+                
+                # Decay epsilon for more exploitation
+                agent.epsilon = max(0.05, agent.epsilon * 0.99)
 
     except Exception as e:
         print(f"  [ERROR] Training failed: {e}")
@@ -105,5 +108,5 @@ def train(task_id="t1", episodes=10):
     return history
 
 if __name__ == "__main__":
-    # Small test run
-    train("t1", episodes=20)
+    # Larger test run to show real RL convergence
+    train("t1", episodes=200)

@@ -5,13 +5,11 @@ from pydantic import Field
 try:
     from openenv.core.env_server import Action, Observation, State
 except ImportError:
-    # Fallbacks for strict typing if openenv-core isn't installed yet
-    @dataclass
-    class Action: pass
-    @dataclass
-    class Observation: pass
-    @dataclass
-    class State: pass
+    # Fallbacls for strict typing if openenv-core isn't installed yet
+    from pydantic import BaseModel
+    class Action(BaseModel): pass
+    class Observation(BaseModel): pass
+    class State(BaseModel): pass
 
 class StandardizationStrategy(str, Enum):
     TO_DATETIME_ISO = "TO_DATETIME_ISO"
