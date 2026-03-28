@@ -8,7 +8,7 @@ app_port: 8080
 pinned: false
 ---
 
-# CRM Data Pipeline OpenEnv 📊
+# CRM Data Pipeline OpenEnv 📊 
 
 An environment that simulates the daily tasks of a real-world CRM Data Engineer. Instead of playing games, an AI agent must query, standardized, deduplicate, and merge messy real-world customer datasets into pristine warehouse tables. 
 
