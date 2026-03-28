@@ -37,6 +37,7 @@ import sqlite3
 # This gives each episode its own isolated truth snapshot.
 # Graders retrieve truth via episode_id stored in CRMPipelineState.
 GLOBAL_TRUTH_STORE: dict = {}
+GLOBAL_ENV_STORE: dict = {}
 
 class CRMDataPipelineEnv(Environment):
     MIN_STEPS_BEFORE_SUBMIT = 3
@@ -53,6 +54,7 @@ class CRMDataPipelineEnv(Environment):
         self._report = ""
         self._last_action = None
         self._final_source_name: str = ""
+        self.final_df = None
 
     def reset(self, task_id: str = "t1") -> "CRMStepResult":
         print(f"DEBUG: CRMStepResult type in reset: {CRMStepResult} (id: {id(CRMStepResult)})")
@@ -67,7 +69,9 @@ class CRMDataPipelineEnv(Environment):
         
         # Key truth by episode_id → each concurrent agent gets its own snapshot
         GLOBAL_TRUTH_STORE[episode_id] = {k: v.copy() for k, v in task_data["hidden_truth"].items()}
+        GLOBAL_ENV_STORE[episode_id] = self
         
+        self.final_df = None
         self._schema_target = task_data["schema"]
         self._conflict_rules = task_data.get("conflict_rules", {})
         
@@ -115,6 +119,7 @@ class CRMDataPipelineEnv(Environment):
                 else:
                     done = True
                     self._final_source_name = action.final_source or ""
+                    self.final_df = self._sources.get(self._final_source_name, None)
                     # Final submission bonus based on schema match (heuristic)
                     df = self.get_final_dataframe()
                     schema_match_ratio = len([c for c in self._schema_target if c in df.columns]) / max(1, len(self._schema_target))

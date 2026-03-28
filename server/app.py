@@ -10,7 +10,7 @@ import yaml
 import server.environment as env_mod
 print(f"DEBUG: env_mod path: {env_mod.__file__}")
 
-from server.environment import CRMDataPipelineEnv, GLOBAL_TRUTH_STORE
+from server.environment import CRMDataPipelineEnv, GLOBAL_TRUTH_STORE, GLOBAL_ENV_STORE
 from server.graders import get_grader, evaluate_dataframes
 from models import CRMPipelineAction, CRMPipelineObservation
 
@@ -69,25 +69,25 @@ def grade_episode(episode_id: str, final_source: str, task_id: str):
     if truth_df is None:
         raise HTTPException(status_code=500, detail=f"Truth key '{truth_key}' missing from snapshot.")
 
-    # The agent must POST its final dataframe as JSON records
-    # (OpenEnv framework handles this via SUBMIT_PIPELINE → env stores _final_source_name)
-    # For the HTTP grader endpoint we need the env instance from the framework.
-    # Fall back to returning a helpful error so the developer knows what's missing.
-    grader_func = get_grader(task_id)
-    if grader_func is None:
-        raise HTTPException(status_code=500, detail="Grader not found.")
+    # Get env instance safely
+    env = GLOBAL_ENV_STORE.get(episode_id)
+    if not env:
+        raise HTTPException(status_code=404, detail="Environment instance not found")
+        
+    agent_df = env.final_df
+    if agent_df is None:
+        raise HTTPException(
+            status_code=400, 
+            detail="Agent has not submitted a final dataframe yet."
+        )
 
-    # NOTE: The OpenEnv framework calls graders directly through the env object.
-    # This endpoint is provided as a convenience for manual testing only.
-    # In production, use the framework's built-in evaluation pipeline.
+    score = evaluate_dataframes(truth_df, agent_df)
+
     return {
         "episode_id": episode_id,
         "task_id": task_id,
-        "note": (
-            "Use the OpenEnv framework evaluation pipeline for production grading. "
-            "This endpoint confirms the truth snapshot exists for this episode."
-        ),
-        "truth_rows": len(truth_df),
+        "score": score,
+        "rows": len(agent_df)
     }
 
 # ---------------------------------------------------------------------------
