@@ -120,6 +120,31 @@ def build_smart_fallback(obs, step: int, task_id: str) -> dict:
             {"action_type": "EXECUTE_SQL", "query": "SELECT * FROM web_forms WHERE customer_id != '???' AND email NOT LIKE '%bot%'", "output_table": "web_forms_clean"},
             {"action_type": "SUBMIT_PIPELINE", "final_source": "web_forms_clean"},
         ],
+        "t2": [
+            {"action_type": "STANDARDIZE_COLUMN", "source": "web_forms", "column": "email", "standardization_strategy": "LOWERCASE_STRIP"},
+            {"action_type": "STANDARDIZE_COLUMN", "source": "web_forms", "column": "name", "standardization_strategy": "LOWERCASE_STRIP"},
+            {"action_type": "STANDARDIZE_COLUMN", "source": "web_forms", "column": "phone", "standardization_strategy": "EXTRACT_NUMBERS"},
+            {"action_type": "STANDARDIZE_COLUMN", "source": "web_forms", "column": "signup_date", "standardization_strategy": "TO_DATETIME_ISO"},
+            {"action_type": "EXECUTE_SQL", "query": "SELECT * FROM web_forms WHERE customer_id != '???' AND email NOT LIKE '%bot%'", "output_table": "web_forms_clean"},
+            {"action_type": "STANDARDIZE_COLUMN", "source": "legacy_db", "column": "email", "standardization_strategy": "LOWERCASE_STRIP"},
+            {"action_type": "STANDARDIZE_COLUMN", "source": "legacy_db", "column": "name", "standardization_strategy": "LOWERCASE_STRIP"},
+            {"action_type": "STANDARDIZE_COLUMN", "source": "legacy_db", "column": "phone", "standardization_strategy": "EXTRACT_NUMBERS"},
+            {"action_type": "STANDARDIZE_COLUMN", "source": "legacy_db", "column": "signup_date", "standardization_strategy": "TO_DATETIME_ISO"},
+            {"action_type": "EXECUTE_SQL", "query": "SELECT * FROM legacy_db WHERE customer_id != '???' AND email NOT LIKE '%bot%'", "output_table": "legacy_db_clean"},
+            {"action_type": "EXECUTE_SQL", "query": "SELECT * FROM web_forms_clean UNION ALL SELECT * FROM legacy_db_clean", "output_table": "merged_output"},
+            {"action_type": "DEDUPLICATE", "source": "merged_output", "deduplication_strategy": "EXACT_EMAIL"},
+            {"action_type": "SUBMIT_PIPELINE", "final_source": "merged_output"},
+        ],
+        "t3": [
+            {"action_type": "STANDARDIZE_COLUMN", "source": "salesforce", "column": "email", "standardization_strategy": "LOWERCASE_STRIP"},
+            {"action_type": "STANDARDIZE_COLUMN", "source": "salesforce", "column": "phone", "standardization_strategy": "EXTRACT_NUMBERS"},
+            {"action_type": "STANDARDIZE_COLUMN", "source": "web_leads", "column": "email", "standardization_strategy": "LOWERCASE_STRIP"},
+            {"action_type": "STANDARDIZE_COLUMN", "source": "web_leads", "column": "phone", "standardization_strategy": "EXTRACT_NUMBERS"},
+            {"action_type": "STANDARDIZE_COLUMN", "source": "legacy_db", "column": "contact_email", "standardization_strategy": "LOWERCASE_STRIP"},
+            {"action_type": "STANDARDIZE_COLUMN", "source": "legacy_db", "column": "home_phone", "standardization_strategy": "EXTRACT_NUMBERS"},
+            {"action_type": "EXECUTE_SQL", "query": "SELECT MAX(customer_id) as customer_id, email, MAX(phone) as phone FROM (SELECT customer_id, email, phone FROM salesforce WHERE customer_id != '???' AND email NOT LIKE '%bot%' UNION ALL SELECT customer_id, email, phone FROM web_leads WHERE customer_id IS NOT NULL AND email NOT LIKE '%bot%' UNION ALL SELECT REPLACE(legacy_id, 'OLD-', 'CUST_') AS customer_id, contact_email AS email, home_phone AS phone FROM legacy_db WHERE legacy_id != '???' AND contact_email NOT LIKE '%bot%') GROUP BY email", "output_table": "merged_output"},
+            {"action_type": "SUBMIT_PIPELINE", "final_source": "merged_output"},
+        ],
     }
 
     plan = fallback_pipeline.get(task_id, [])
@@ -140,57 +165,65 @@ def validate_action(payload: dict) -> CRMPipelineAction | None:
         print(f"  [WARN] Action validation failed: {e}")
         return None
 
-def run_task(task_id: str) -> float:
-    base_url = os.environ.get("OPENENV_BASE_URL", "http://localhost:8080")
-    print(f"\n--- Starting Baseline Inference for Task {task_id} ---")
-    score = 0.0
 
-    # Notify server which task this connection is for
-    try:
-        requests.post(f"{base_url}/set_task/{task_id}", timeout=5)
-    except Exception as e:
-        print(f"  [WARN] Could not set task on server: {e}")
+class RuleBasedBaseline:
+    """A non-LLM baseline that follows a hardcoded cleaning script."""
+    def __init__(self, task_id: str):
+        self.task_id = task_id
+
+    def act(self, obs, step: int) -> dict:
+        return build_smart_fallback(obs, step, self.task_id)
+
+def run_task(task_id: str, use_llm: bool = True) -> float:
+    base_url = os.environ.get("OPENENV_BASE_URL", "http://localhost:8080")
+    print(f"\n--- Starting Baseline Inference for Task {task_id} (LLM={use_llm}) ---")
+    score = 0.0
 
     try:
         with CRMDataPipelineEnvClient(base_url=base_url).sync() as env:
-            result = env.reset()
+            # Pass task_id directly to reset() — no global state!
+            result = env.reset(task_id=task_id)
             done = False
             steps = 0
+            
+            agent = RuleBasedBaseline(task_id)
 
             while not done and steps < MAX_STEPS_PER_TASK:
                 obs = result.observation
                 steps_remaining = MAX_STEPS_PER_TASK - steps
-                prompt = build_user_prompt(obs, steps_remaining, task_id)
-
-                # Try GPT first, fall back to smart pipeline if it fails
-                payload = call_gpt_with_retry(prompt)
-                action = validate_action(payload) if payload else None
+                
+                if use_llm:
+                    prompt = build_user_prompt(obs, steps_remaining, task_id)
+                    payload = call_gpt_with_retry(prompt)
+                    action = validate_action(payload) if payload else None
+                else:
+                    action = None
 
                 if action is None:
-                    print(f"  [FALLBACK] Step {steps}: using smart fallback pipeline")
-                    fallback_payload = build_smart_fallback(obs, steps, task_id)
-                    action = validate_action(fallback_payload)
-                    if action is None:
-                        break  # Safety net — cannot recover
+                    if use_llm:
+                        print(f"  [FALLBACK] Step {steps}: using smart fallback pipeline")
+                    payload = agent.act(obs, steps)
+                    action = validate_action(payload)
+
+                if action is None:
+                    break
 
                 print(f"  Step {steps}: {action.action_type.value}")
                 result = env.step(action)
                 done = result.done
                 steps += 1
 
-        # Fetch final graded score — no silent fallbacks, we log the real error
-        try:
-            grader_res = requests.post(f"{base_url}/grader/{task_id}", timeout=10)
-            grader_res.raise_for_status()
-            score = grader_res.json().get("score", 0.0)
+            # Fetch final graded score
+            score = result.reward if result else 0.0
             print(f"  Final Score [{task_id}]: {score:.4f}")
-        except Exception as e:
-            print(f"  [ERROR] Grader endpoint failed: {e}")
-            score = 0.0
 
     except Exception as e:
-        print(f"  [ERROR] Runtime Exception in task {task_id}: {e}")
-        score = 0.0
+        if "1000 (OK)" not in str(e):
+            import traceback; traceback.print_exc()
+            print(f"  [ERROR] Runtime Exception in task {task_id}: {e}")
+            score = 0.0
+        else:
+            print(f"  [INFO] Connection cleanly closed.")
 
     return score
 

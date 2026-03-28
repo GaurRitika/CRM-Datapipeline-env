@@ -1,6 +1,5 @@
 import pandas as pd
 from server.environment import CRMDataPipelineEnv
-from server.data_generator import get_task_data
 
 def evaluate_dataframes(truth_df: pd.DataFrame, final_df: pd.DataFrame, join_key="customer_id") -> float:
     if final_df.empty or truth_df is None or truth_df.empty:
@@ -51,21 +50,26 @@ def evaluate_dataframes(truth_df: pd.DataFrame, final_df: pd.DataFrame, join_key
     penalty = max(0, len(final_df) - num_truth_rows) * 0.15
     return min(1.0, max(0.0, score - penalty))
 
-def grade_task_1(env: CRMDataPipelineEnv) -> float:
-    final_df = env.get_final_dataframe("web_forms")
-    # Dynamically regenerate Truth on-the-fly via deterministic faker seeds! Zero memory leakage!
-    truth_df = get_task_data("t1")["hidden_truth"]["web_forms"]
+def _grade(env: CRMDataPipelineEnv, truth_key: str, final_source: str) -> float:
+    """
+    Grade using the truth snapshot captured at episode reset time.
+    No data regeneration — truth is always consistent with what the agent saw.
+    """
+    episode_truth = env.get_episode_truth()
+    truth_df = episode_truth.get(truth_key)
+    if truth_df is None:
+        return 0.0
+    final_df = env.get_final_dataframe(final_source)
     return evaluate_dataframes(truth_df, final_df)
+
+def grade_task_1(env: CRMDataPipelineEnv) -> float:
+    return _grade(env, "web_forms", "web_forms")
 
 def grade_task_2(env: CRMDataPipelineEnv) -> float:
-    final_df = env.get_final_dataframe("merged_output")
-    truth_df = get_task_data("t2")["hidden_truth"]["merged_output"]
-    return evaluate_dataframes(truth_df, final_df)
+    return _grade(env, "merged_output", "merged_output")
 
 def grade_task_3(env: CRMDataPipelineEnv) -> float:
-    final_df = env.get_final_dataframe("merged_output")
-    truth_df = get_task_data("t3")["hidden_truth"]["merged_output"]
-    return evaluate_dataframes(truth_df, final_df)
+    return _grade(env, "merged_output", "merged_output")
 
 def get_grader(task_id: str):
     return {"t1": grade_task_1, "t2": grade_task_2, "t3": grade_task_3}.get(task_id)

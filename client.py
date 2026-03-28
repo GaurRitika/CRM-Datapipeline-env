@@ -7,11 +7,22 @@ try:
     from openenv.core.client_types import StepResult
 except ImportError:
     class EnvClient: pass
-    class StepResult: pass
+    class StepResult:
+        def __init__(self, observation, reward: float = 0.0, done: bool = False):
+            self.observation = observation
+            self.reward = reward
+            self.done = done
 
 class CRMDataPipelineEnvClient(EnvClient[CRMPipelineAction, CRMPipelineObservation, CRMPipelineState]):
     def _step_payload(self, action: CRMPipelineAction) -> dict:
-        return json.loads(action.model_dump_json(exclude_none=True))
+        if hasattr(action, "model_dump_json"):
+            return json.loads(action.model_dump_json(exclude_none=True))
+        if hasattr(action, "json"):
+            return json.loads(action.json(exclude_none=True))
+        import dataclasses
+        if dataclasses.is_dataclass(action):
+            return {k: v for k, v in dataclasses.asdict(action).items() if v is not None}
+        return {k: v for k, v in action.__dict__.items() if v is not None}
 
     def _parse_result(self, payload: dict) -> "StepResult":
         obs_data = payload.get("observation", payload)

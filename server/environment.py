@@ -1,7 +1,7 @@
 import pandas as pd
 import uuid
 import re
-from typing import Dict
+from typing import Dict, Any, Optional
 from models import (
     CRMPipelineAction, 
     CRMPipelineObservation, 
@@ -15,61 +15,77 @@ from models import (
 from server.data_generator import get_task_data
 
 try:
-    from openenv.core.env_server import Environment, StepResult
+    from openenv.core.env_server import Environment
 except ImportError:
-    # Stub it for type checking if openenv not fully installed yet locally
     class Environment: pass
-    class StepResult:
-        def __init__(self, observation, reward, done):
-            self.observation = observation
-            self.reward = reward
-            self.done = done
+
+from pydantic import BaseModel
+
+class CRMStepResult(BaseModel):
+    """Standard StepResult container for OpenEnv responses."""
+    observation: Any
+    reward: float = 0.0
+    done: bool = False
+
+    class Config:
+        arbitrary_types_allowed = True
 
 import os
 import sqlite3
 
-LAST_ENV_INSTANCE = {}
-GLOBAL_TRUTH_STORE = {}
+# GLOBAL_TRUTH_STORE: keyed by episode_id (uuid), NOT task_id
+# This gives each episode its own isolated truth snapshot.
+# Graders retrieve truth via episode_id stored in CRMPipelineState.
+GLOBAL_TRUTH_STORE: dict = {}
 
 class CRMDataPipelineEnv(Environment):
+    MIN_STEPS_BEFORE_SUBMIT = 3
+
     def __init__(self, **kwargs):
-        self._task_id = os.environ.get("CURRENT_TASK_ID", "t1")
-        LAST_ENV_INSTANCE[self._task_id] = self
+        # task_id is set per-episode in reset(), not from env var
+        self._task_id = "t1"
         self._state = CRMPipelineState(episode_id=None, step_count=0, task_id=self._task_id)
         self._sources: Dict[str, pd.DataFrame] = {}
         self._schema_target: Dict[str, str] = {}
+        self._conflict_rules: Dict[str, str] = {}
         self._current_view = "No source loaded yet."
         self._last_feedback = ""
         self._report = ""
         self._last_action = None
+        self._final_source_name: str = ""
 
-    def reset(self, task_id: str = "t1") -> StepResult:
+    def reset(self, task_id: str = "t1") -> "CRMStepResult":
+        print(f"DEBUG: CRMStepResult type in reset: {CRMStepResult} (id: {id(CRMStepResult)})")
         self._task_id = task_id
         task_data = get_task_data(task_id)
         
-        # We must clone these dataframes so mutations don't bleed across episodes
+        # Clone source frames so mutations don't bleed across episodes
         self._sources = {k: v.copy() for k, v in task_data["sources"].items()}
+        self._final_source_name = ""
         
-        # STRICT TRUTH ISOLATION: Store globally, absolutely zero class binding
-        GLOBAL_TRUTH_STORE[task_id] = {k: v.copy() for k, v in task_data["hidden_truth"].items()}
+        episode_id = str(uuid.uuid4())
+        
+        # Key truth by episode_id → each concurrent agent gets its own snapshot
+        GLOBAL_TRUTH_STORE[episode_id] = {k: v.copy() for k, v in task_data["hidden_truth"].items()}
         
         self._schema_target = task_data["schema"]
+        self._conflict_rules = task_data.get("conflict_rules", {})
         
         self._state = CRMPipelineState(
-            episode_id=str(uuid.uuid4()),
+            episode_id=episode_id,
             step_count=0,
             task_id=task_id
         )
         
         self._current_view = "Select a source to view."
-        self._last_feedback = f"Environment reset for task {task_id}."
+        self._last_feedback = f"Environment reset for task {task_id}. Episode: {episode_id}"
         self._report = None
         self._last_action = None
         
         obs = self._build_observation(done=False, reward=0.0)
-        return StepResult(observation=obs, reward=0.0, done=False)
+        return CRMStepResult(observation=obs, reward=0.0, done=False)
         
-    def step(self, action: CRMPipelineAction) -> StepResult:
+    def step(self, action: CRMPipelineAction) -> "CRMStepResult":
         self._state.step_count += 1
         reward = 0.0
         done = False
@@ -92,8 +108,18 @@ class CRMDataPipelineEnv(Environment):
             elif action.action_type == PipelineActionType.EXECUTE_SQL:
                 reward += self._handle_sql(action)
             elif action.action_type == PipelineActionType.SUBMIT_PIPELINE:
-                done = True
-                self._last_feedback = f"Pipeline submitted with final source: {action.final_source}."
+                if self._state.step_count < self.MIN_STEPS_BEFORE_SUBMIT:
+                    reward = -0.15
+                    self._last_feedback = f"Early submission blocked. You must perform at least {self.MIN_STEPS_BEFORE_SUBMIT} cleaning steps (Profile, Standardize, etc.) before submitting."
+                    done = False
+                else:
+                    done = True
+                    self._final_source_name = action.final_source or ""
+                    # Final submission bonus based on schema match (heuristic)
+                    df = self.get_final_dataframe()
+                    schema_match_ratio = len([c for c in self._schema_target if c in df.columns]) / max(1, len(self._schema_target))
+                    reward = 0.2 * schema_match_ratio
+                    self._last_feedback = f"Pipeline submitted with final source: {action.final_source}."
             else:
                 self._last_feedback = "Unknown action type."
                 reward = -0.05
@@ -102,7 +128,13 @@ class CRMDataPipelineEnv(Environment):
             reward = -0.05
             
         obs = self._build_observation(done=done, reward=reward)
-        return StepResult(observation=obs, reward=reward, done=done)
+        return CRMStepResult(observation=obs, reward=reward, done=done)
+        
+    async def reset_async(self, task_id: str = "t1") -> "CRMStepResult":
+        return self.reset(task_id=task_id)
+        
+    async def step_async(self, action: CRMPipelineAction) -> "CRMStepResult":
+        return self.step(action=action)
         
     def _build_observation(self, done: bool, reward: float) -> CRMPipelineObservation:
         objective = {
@@ -119,16 +151,22 @@ class CRMDataPipelineEnv(Environment):
             available_sources=list(self._sources.keys()),
             current_view=self._current_view,
             data_quality_report=self._report if self._report else "",
-            last_action_feedback=self._last_feedback
+            last_action_feedback=self._last_feedback,
+            conflict_rules=self._conflict_rules if self._conflict_rules else None
         )
         
     @property
     def state(self) -> CRMPipelineState:
         return self._state
         
-    def get_final_dataframe(self, final_source_name: str) -> pd.DataFrame:
-        """Helper for the grader to retrieve the final dataframe"""
-        return self._sources.get(final_source_name, pd.DataFrame())
+    def get_episode_truth(self) -> dict:
+        """Return the truth snapshot for this episode (keyed by episode_id)."""
+        return GLOBAL_TRUTH_STORE.get(self._state.episode_id, {})
+
+    def get_final_dataframe(self, final_source_name: str = "") -> pd.DataFrame:
+        """Return the submitted final dataframe. Falls back to self._final_source_name."""
+        name = final_source_name or self._final_source_name
+        return self._sources.get(name, pd.DataFrame())
             
     # -- ACTION HANDLERS --
     
@@ -152,12 +190,19 @@ class CRMDataPipelineEnv(Environment):
         col = self._get_col(df, action.column)
         strat = action.standardization_strategy
         
-        # Clone before mutation to check correctness
-        old_series = df[col].copy()
+        # Heuristic reward: measure how many values changed to "better" format
+        # without leaking Ground Truth.
+        change_count = 0
+        total_rows = len(df)
         
         if strat == StandardizationStrategy.LOWERCASE_STRIP:
+            # Check if strings are already lowercase/stripped
+            pre_clean = df[col].astype(str).str.contains(r'[A-Z]|\s+$|^\s+', regex=True).sum()
             df[col] = df[col].astype(str).str.lower().str.strip()
+            change_count = pre_clean
         elif strat == StandardizationStrategy.EXTRACT_NUMBERS:
+            # Check for non-digit characters in phone (excluding + prefix)
+            pre_clean = df[col].astype(str).str.contains(r'[^\d+]', regex=True).sum()
             def to_e164(p):
                 if pd.isna(p) or p is None: return ""
                 s = str(p).lower()
@@ -165,17 +210,19 @@ class CRMDataPipelineEnv(Environment):
                     s = s.split('ext')[0].split('x')[0]
                 digits = re.sub(r'\D+', '', s)
                 if not digits: return ""
-                return "+" + digits if not s.startswith("+") else "+" + digits
+                return "+" + digits
             df[col] = df[col].apply(to_e164)
+            change_count = pre_clean
         elif strat == StandardizationStrategy.TO_DATETIME_ISO:
-            # We force it into typical ISO format YYYY-MM-DD string, invalid dates become empty strings
+            pre_clean = df[col].astype(str).str.contains(r'/', regex=True).sum() # common dirty separator
             df[col] = pd.to_datetime(df[col], errors='coerce').dt.strftime('%Y-%m-%dT00:00:00').fillna("")
+            change_count = pre_clean
             
         self._last_feedback = f"Standardized {action.source}.{col} using {strat}"
         
-        # Removed toy reward matching against Ground Truth
-        # Judges want sparse semantic rewards or heuristic rewards without leaking GT checks
-        return 0.0
+        # Dense reward: +0.01 per 10% of rows improved (capped at 0.05)
+        improvement_ratio = change_count / max(1, total_rows)
+        return min(0.05, 0.01 + (improvement_ratio * 0.1))
 
     def _handle_missing(self, action: CRMPipelineAction) -> float:
         df = self._get_df(action.source)
@@ -185,12 +232,13 @@ class CRMDataPipelineEnv(Environment):
         null_count_before = df[col].isnull().sum()
         if strat == MissingStrategy.DROP_ROW:
             df.dropna(subset=[col], inplace=True)
+            reward = (null_count_before / max(1, len(df) + null_count_before)) * 0.1
         elif strat == MissingStrategy.FILL_VALUE:
             df[col].fillna(action.fallback_value, inplace=True)
+            reward = (null_count_before / max(1, len(df))) * 0.05
             
         self._last_feedback = f"Handled {null_count_before} missing values in {action.source}.{col}"
-        # Small positive reward for removing missing data, though Grader cares about truth mostly
-        return 0.01
+        return max(0.01, reward)
 
     def _handle_deduplicate(self, action: CRMPipelineAction) -> float:
         df = self._get_df(action.source)
@@ -205,30 +253,45 @@ class CRMDataPipelineEnv(Environment):
              df.drop_duplicates(subset=["_tmp_name", "_tmp_phone"], inplace=True)
              df.drop(columns=["_tmp_name", "_tmp_phone"], inplace=True)
              
+        removed = start_len - len(df)
         self._sources[action.source] = df # Save it back
-        self._last_feedback = f"Deduplicated {action.source}, removed {start_len - len(df)} rows."
+        self._last_feedback = f"Deduplicated {action.source}, removed {removed} rows."
         
-        return 0.0
+        # Fraction of source cleaned * base reward
+        return (removed / max(1, start_len)) * 0.2
 
     def _handle_merge(self, action: CRMPipelineAction) -> float:
-         df1 = self._get_df(action.source)
-         df2 = self._get_df(action.source2)
+         df1 = self._get_df(action.source).copy()
+         df2 = self._get_df(action.source2).copy()
          
-         merged = pd.merge(df1, df2, on=action.join_key, how="outer", suffixes=('_s1', '_s2'))
+         key = action.join_key
+         if key not in df1.columns or key not in df2.columns:
+             self._last_feedback = f"Merge failed: key '{key}' missing from one of the sources."
+             return -0.05
+
+         # Realistic "fuzzy" prep: normalize join keys
+         df1[key] = df1[key].astype(str).str.lower().str.strip()
+         df2[key] = df2[key].astype(str).str.lower().str.strip()
          
-         # Resolve conflict
-         for col in merged.columns:
+         merged = pd.merge(df1, df2, on=key, how="outer", suffixes=('_s1', '_s2'))
+         
+         # Resolve conflicts and COALESCE
+         for col in list(merged.columns):
              if col.endswith('_s1'):
                  base_col = col[:-3]
                  s1_col, s2_col = base_col + '_s1', base_col + '_s2'
-                 if action.conflict_rule == ConflictRule.PREFER_S1:
-                     merged[base_col] = merged[s1_col].combine_first(merged[s2_col])
-                 elif action.conflict_rule == ConflictRule.PREFER_S2:
-                     merged[base_col] = merged[s2_col].combine_first(merged[s1_col])
-                 merged.drop(columns=[s1_col, s2_col], inplace=True)
                  
+                 if s2_col in merged.columns:
+                     if action.conflict_rule == ConflictRule.PREFER_S1:
+                         merged[base_col] = merged[s1_col].combine_first(merged[s2_col])
+                     elif action.conflict_rule == ConflictRule.PREFER_S2:
+                         merged[base_col] = merged[s2_col].combine_first(merged[s1_col])
+                     else: # Default COALESCE
+                         merged[base_col] = merged[s1_col].combine_first(merged[s2_col])
+                     merged.drop(columns=[s1_col, s2_col], inplace=True)
+                  
          self._sources["merged_output"] = merged
-         self._last_feedback = f"Merged {action.source} and {action.source2} into 'merged_output'"
+         self._last_feedback = f"Merged {action.source} and {action.source2} into 'merged_output' using {key}."
          return 0.05
         
     def _handle_sql(self, action: CRMPipelineAction) -> float:
@@ -242,6 +305,17 @@ class CRMDataPipelineEnv(Environment):
             clean_df.to_sql(name, conn, index=False, if_exists='replace')
             
         try:
+            # SQL Injection Hardening
+            query_stripped = action.query.strip().upper()
+            if not query_stripped.startswith("SELECT "):
+                self._last_feedback = "Blocked Action: Only SELECT queries are allowed for security."
+                return -0.1
+
+            forbidden = ["DROP ", "DELETE ", "UPDATE ", "INSERT ", "ALTER ", "CREATE ", "TRUNCATE "]
+            if any(cmd in query_stripped for cmd in forbidden):
+                self._last_feedback = f"Blocked: Query contains forbidden keyword."
+                return -0.1
+
             result_df = pd.read_sql_query(action.query, conn)
             out_name = action.output_table if action.output_table else "sql_output"
             self._sources[out_name] = result_df

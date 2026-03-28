@@ -68,6 +68,10 @@ class CRMPipelineObservation(Observation):
     current_view: str  # Markdown table string, max 3 rows to save tokens
     data_quality_report: Optional[str] # Markdown string of quality report
     last_action_feedback: str
+    conflict_rules: Optional[Dict[str, str]] = Field(
+        None,
+        description="Per-column source priority rules for t3 (e.g. prefer_salesforce / prefer_web_leads)"
+    )
 
 class CRMPipelineState(State):
     episode_id: Optional[str] = None
