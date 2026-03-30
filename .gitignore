@@ -40,3 +40,6 @@ Thumbs.db
 
 # Project Specific
 openenv-course/
+
+# Demo UI
+public/

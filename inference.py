@@ -21,12 +21,12 @@ load_dotenv()
 # SECURITY: API key is ONLY read from environment variables.
 # If missing, we raise immediately rather than silently failing.
 # ============================================================
-HF_TOKEN = os.environ.get("HF_TOKEN")
+HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("OPENAI_API_KEY")
 API_BASE_URL = os.environ.get("API_BASE_URL")
 MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-4o-mini")
 
 if not HF_TOKEN:
-    raise EnvironmentError("HF_TOKEN is not set.")
+    raise EnvironmentError("HF_TOKEN (or OPENAI_API_KEY) is not set.")
 
 openai_client = OpenAI(
     api_key=HF_TOKEN,
@@ -175,29 +175,50 @@ class RuleBasedBaseline:
         return build_smart_fallback(obs, step, self.task_id)
 
 def run_task(task_id: str, use_llm: bool = True) -> float:
-    base_url = os.environ.get("OPENENV_BASE_URL", "http://localhost:8080")
+    """
+    Run the baseline agent on a single task.
+
+    Parameters
+    ----------
+    task_id : 't1' | 't2' | 't3'
+    use_llm : If True, call GPT; fall back to rule-based on failure.
+              If False, always use the deterministic rule-based baseline.
+    """
+    base_url = os.environ.get("OPENENV_BASE_URL", "http://127.0.0.1:8080")
     print(f"\n--- Starting Baseline Inference for Task {task_id} (LLM={use_llm}) ---")
     score = 0.0
 
     try:
         with CRMDataPipelineEnvClient(base_url=base_url).sync() as env:
-            # Pass task_id directly to reset() — no global state!
             result = env.reset(task_id=task_id)
             done = False
             steps = 0
             
+            # Extract episode_id for grader
+            episode_id = None
+            if getattr(env, "state", None) and getattr(env.state, "episode_id", None):
+                episode_id = env.state.episode_id
+            
+            if not episode_id and result and result.observation:
+                import re
+                feedback = getattr(result.observation, "last_action_feedback", "")
+                m = re.search(r"Episode: ([\w-]+)", feedback)
+                if m:
+                    episode_id = m.group(1)
+
             agent = RuleBasedBaseline(task_id)
+            action = None
 
             while not done and steps < MAX_STEPS_PER_TASK:
                 obs = result.observation
                 steps_remaining = MAX_STEPS_PER_TASK - steps
                 
+                payload = None
                 if use_llm:
                     prompt = build_user_prompt(obs, steps_remaining, task_id)
                     payload = call_gpt_with_retry(prompt)
-                    action = validate_action(payload) if payload else None
-                else:
-                    action = None
+
+                action = validate_action(payload) if payload else None
 
                 if action is None:
                     if use_llm:
@@ -213,15 +234,27 @@ def run_task(task_id: str, use_llm: bool = True) -> float:
                 done = result.done
                 steps += 1
 
-            # Fetch final graded score
-            score = result.reward if result else 0.0
+            # Fetch final graded score using OpenEnv grading standard via HTTP REST
+            if episode_id:
+                final_src = getattr(action, "final_source", "merged_output") if action else "merged_output"
+                try:
+                    resp = requests.post(
+                        f"{base_url.replace('ws://', 'http://')}/grader/{episode_id}",
+                        params={"final_source": final_src, "task_id": task_id}
+                    )
+                    resp.raise_for_status()
+                    score = resp.json().get("score", 0.0)
+                except Exception as e:
+                    print(f"  [ERROR] Grader REST Error: {e}")
+            else:
+                print("  [WARN] Fallback heuristic score used (no episode_id found).")
+                score = result.reward if result else 0.0
+
             print(f"  Final Score [{task_id}]: {score:.4f}")
 
     except Exception as e:
         if "1000 (OK)" not in str(e):
-            import traceback; traceback.print_exc()
             print(f"  [ERROR] Runtime Exception in task {task_id}: {e}")
-            score = 0.0
         else:
             print(f"  [INFO] Connection cleanly closed.")
 
@@ -231,7 +264,7 @@ def run_task(task_id: str, use_llm: bool = True) -> float:
 if __name__ == "__main__":
     results = {}
     for task_id in ["t1", "t2", "t3"]:
-        results[task_id] = run_task(task_id)
+        results[task_id] = run_task(task_id, use_llm=False)
 
     results["average"] = sum(results.values()) / 3
     print("\n=== Final Scores ===")

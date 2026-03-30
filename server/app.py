@@ -105,13 +105,13 @@ def run_baseline():
     Not required for OpenEnv evaluation. May add latency due to LLM calls.
     """
     try:
-        from baseline import run_task   # lazy import — do not couple to server startup
-        t1 = run_task("t1")
-        t2 = run_task("t2")
-        t3 = run_task("t3")
+        from inference import run_task   # lazy import — do not couple to server startup
+        t1 = run_task("t1", use_llm=False)
+        t2 = run_task("t2", use_llm=False)
+        t3 = run_task("t3", use_llm=False)
         return {"demo": True, "scores": {"t1": t1, "t2": t2, "t3": t3}}
     except ImportError:
-        raise HTTPException(status_code=501, detail="baseline.py not available.")
+        raise HTTPException(status_code=501, detail="inference.py not available.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
