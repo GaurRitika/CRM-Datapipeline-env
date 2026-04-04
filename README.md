@@ -36,14 +36,14 @@ graph TD
     classDef sys fill:#0f172a,stroke:#64748b,stroke-width:2px,color:#fff,rx:4px,ry:4px;
     classDef output fill:#064e3b,stroke:#10b981,stroke-width:2px,color:#fff,rx:4px,ry:4px;
     
-    A[LLM Agent]:::agent -- 1. Step(Action) --> B(FastAPI Server):::sys
-    B -- 2. Mutate Memory --> C[(Pandas DataFrame)]:::sys
-    C -- 3. Assess Progress --> D[Reward Function]:::sys
-    D -- 4. Return Observation --> A
+    A[LLM Agent]:::agent -->|1. StepAction| B[FastAPI Server]:::sys
+    B -->|2. Mutate Memory| C[(Pandas DataFrame)]:::sys
+    C -->|3. Assess Progress| D[Reward Function]:::sys
+    D -->|4. Return Observation| A
     
-    A -- 5. SUBMIT_PIPELINE --> F[Grader Engine]:::sys
-    E[(Ground Truth)]:::sys -. Compare .-> F
-    F -- 7. Final Score --> G[Result (0.0 - 1.0)]:::output
+    A -->|5. SUBMIT_PIPELINE| F[Grader Engine]:::sys
+    E[(Ground Truth)]:::sys -.->|6. Compare| F
+    F -->|7. Final Score| G[Result 0.0 - 1.0]:::output
 ```
 
 ### 🎯 Reward Signal
