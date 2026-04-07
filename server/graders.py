@@ -3,7 +3,7 @@ from server.environment import CRMDataPipelineEnv
 
 def evaluate_dataframes(truth_df: pd.DataFrame, final_df: pd.DataFrame, join_key="customer_id") -> float:
     if final_df.empty or truth_df is None or truth_df.empty:
-        return 0.0
+        return 0.01
         
     try:
         # We enforce uniqueness on the join key to prevent Cartesian explosion during merge if agent failed to dedup
@@ -11,7 +11,7 @@ def evaluate_dataframes(truth_df: pd.DataFrame, final_df: pd.DataFrame, join_key
         merged = pd.merge(truth_df, eval_df, on=join_key, suffixes=('_truth', '_agent'), how='left')
     except Exception:
         # If join fails due to missing keys or type mismatch
-        return 0.0
+        return 0.01
         
     num_truth_rows = len(truth_df)
     
@@ -25,7 +25,7 @@ def evaluate_dataframes(truth_df: pd.DataFrame, final_df: pd.DataFrame, join_key
         
         if col_agent not in merged.columns and col not in final_df.columns:
             # Missing column entirely
-            return 0.0
+            return 0.01
             
         # If the merge didn't suffix it (because truth_df only had the column), fetch original name
         actual_col_agent = col_agent if col_agent in merged.columns else col
@@ -48,7 +48,7 @@ def evaluate_dataframes(truth_df: pd.DataFrame, final_df: pd.DataFrame, join_key
     
     # Severe penalty for leaving in bots or duplicated junk rows
     penalty = max(0, len(final_df) - num_truth_rows) * 0.15
-    return min(1.0, max(0.0, score - penalty))
+    return min(0.99, max(0.01, score - penalty))
 
 def _grade(env: CRMDataPipelineEnv, truth_key: str, final_source: str) -> float:
     """
@@ -58,7 +58,7 @@ def _grade(env: CRMDataPipelineEnv, truth_key: str, final_source: str) -> float:
     episode_truth = env.get_episode_truth()
     truth_df = episode_truth.get(truth_key)
     if truth_df is None:
-        return 0.0
+        return 0.01
     final_df = env.get_final_dataframe(final_source)
     return evaluate_dataframes(truth_df, final_df)
 

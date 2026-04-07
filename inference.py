@@ -267,6 +267,7 @@ def run_task(task_id: str, use_llm: bool = True) -> float:
 
             score = result.reward if result and result.done else 0.0
             score = float(score) if score else 0.0
+            score = min(0.99, max(0.01, score))
 
             print(f"[DEBUG] Final Score [{task_id}]: {score:.4f}", flush=True)
 
