@@ -24,13 +24,12 @@ load_dotenv()
 # ============================================================
 API_BASE_URL = os.getenv("API_BASE_URL", "<your-active-model-base-url>")
 MODEL_NAME = os.getenv("MODEL_NAME", "<your-active-model-name>")
-HF_TOKEN = os.getenv("HF_TOKEN")
-
+API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY", "dummy_key")
 # Optional - if you use from_docker_image():
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
 openai_client = OpenAI(
-    api_key=HF_TOKEN,
+    api_key=API_KEY,
     base_url=API_BASE_URL
 )
 MAX_STEPS_PER_TASK = 15  # Up from 6 — enough for complex T3 multi-merge pipelines
@@ -298,7 +297,7 @@ def run_task(task_id: str, use_llm: bool = True) -> float:
 if __name__ == "__main__":
     results = {}
     for task_id in ["t1", "t2", "t3"]:
-        results[task_id] = run_task(task_id, use_llm=False)
+        results[task_id] = run_task(task_id, use_llm=True)
 
     results["average"] = sum(results.values()) / 3
     print("[DEBUG] === Final Scores ===", flush=True)
