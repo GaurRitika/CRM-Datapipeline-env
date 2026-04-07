@@ -22,9 +22,9 @@ load_dotenv()
 # SECURITY: API key is ONLY read from environment variables.
 # If missing, we raise immediately rather than silently failing.
 # ============================================================
-API_BASE_URL = os.environ["API_BASE_URL"]
-MODEL_NAME = os.getenv("MODEL_NAME", "<your-active-model-name>")
-API_KEY = os.environ["API_KEY"]
+API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
+MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
 # Optional - if you use from_docker_image():
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
